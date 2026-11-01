@@ -1,0 +1,11 @@
+#include <windows.h>
+
+// Bright cyan speaker when active, dim cyan when idle; both use ray-free artwork.
+
+#define IDI_APP_ICON 101
+#define IDI_TRAY_ACTIVE 102
+#define IDI_TRAY_IDLE 103
+
+IDI_APP_ICON ICON "assets/icon-active.ico"
+IDI_TRAY_ACTIVE ICON "assets/icon-active.ico"
+IDI_TRAY_IDLE ICON "assets/icon-idle.ico"

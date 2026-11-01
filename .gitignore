@@ -1,0 +1,24 @@
+# Code::Blocks output and per-user workspace files
+/bin/
+/obj/
+*.depend
+*.layout
+
+# Local application settings
+settings.ini
+
+# Compiled files
+*.o
+*.obj
+*.res
+*.exe
+*.dll
+*.a
+*.lib
+*.pdb
+*.ilk
+*.pch
+
+# Operating system files
+Thumbs.db
+.DS_Store
