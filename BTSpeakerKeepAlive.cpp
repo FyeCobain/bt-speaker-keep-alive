@@ -35,6 +35,7 @@ namespace
     constexpr UINT COMMAND_EXIT = 1005;
     constexpr UINT COMMAND_OPEN_FOLDER = 1006;
     constexpr UINT COMMAND_START_WITH_WINDOWS = 1007;
+    constexpr UINT COMMAND_PROMPT_NEW_DEVICES = 1008;
     constexpr UINT COMMAND_DEVICE_BASE = 2000;
     constexpr UINT DEVICE_SCAN_TIMER = 1;
     constexpr WORD TRAY_ACTIVE_ICON_RESOURCE = 102;
@@ -63,6 +64,7 @@ namespace
     std::atomic<unsigned> activeKeepAliveStreams{0};
     std::wstring appDirectory;
     std::wstring language = L"en";
+    bool promptForNewDevices = true;
     std::unordered_map<std::wstring, std::wstring> strings;
 
     struct RegisteredDevice
@@ -401,6 +403,8 @@ namespace
             return;
 
         std::wstring wideContents = L"language=" + language + L"\r\n";
+        wideContents += L"prompt_new_devices=";
+        wideContents += promptForNewDevices ? L"1\r\n" : L"0\r\n";
         {
             std::lock_guard<std::mutex> lock(devicesMutex);
             std::vector<DeviceGroup> groups;
@@ -480,6 +484,8 @@ namespace
                 else if (value == L"de" || value == L"ja")
                     language = value;
             }
+            else if (line.compare(0, 19, L"prompt_new_devices=") == 0)
+                promptForNewDevices = Trim(line.substr(19)) == L"1";
             else if (line.compare(0, 7, L"device=") == 0)
             {
                 const size_t firstComma = line.find(L',', 7);
@@ -592,9 +598,6 @@ namespace
             return;
         }
 
-        AppendMenuW(menu, MF_STRING, COMMAND_OPEN_FOLDER,
-                    Text(L"menu_open_folder").c_str());
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(languageMenu, MF_STRING | (language == L"en" ? MF_CHECKED : 0),
                     COMMAND_ENGLISH, Text(L"language_english").c_str());
         AppendMenuW(languageMenu, MF_STRING | (language == L"es" ? MF_CHECKED : 0),
@@ -653,12 +656,19 @@ namespace
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(devicesMenu),
                     Text(L"menu_devices").c_str());
         AppendMenuW(menu, MF_STRING |
+                    (promptForNewDevices ? MF_CHECKED : 0),
+                    COMMAND_PROMPT_NEW_DEVICES,
+                    Text(L"menu_prompt_new_devices").c_str());
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING |
                     (IsStartWithWindowsEnabled() ? MF_CHECKED : 0),
                     COMMAND_START_WITH_WINDOWS,
                     Text(L"menu_start_with_windows").c_str());
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(languageMenu),
                     Text(L"menu_language").c_str());
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, COMMAND_OPEN_FOLDER,
+                    Text(L"menu_open_folder").c_str());
         AppendMenuW(menu, MF_STRING, COMMAND_EXIT, Text(L"menu_exit").c_str());
 
         POINT cursor = {};
@@ -684,6 +694,11 @@ namespace
             ShellExecuteW(window, L"open", appDirectory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         else if (command == COMMAND_START_WITH_WINDOWS)
             ToggleStartWithWindows(window);
+        else if (command == COMMAND_PROMPT_NEW_DEVICES)
+        {
+            promptForNewDevices = !promptForNewDevices;
+            SaveSettings();
+        }
         else if (command >= COMMAND_DEVICE_BASE)
             ToggleRegisteredDevice(command);
 
@@ -1063,11 +1078,15 @@ namespace
 
         if (!alreadyRegistered && running.load())
         {
-            std::wstring prompt = ReplaceToken(
-                Text(L"new_device_question"), L"{device}", device->name);
-            const int answer = MessageBoxW(
-                mainWindow, prompt.c_str(), Text(L"menu_title").c_str(),
-                MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST);
+            int answer = IDNO;
+            if (promptForNewDevices)
+            {
+                std::wstring prompt = ReplaceToken(
+                    Text(L"new_device_question"), L"{device}", device->name);
+                answer = MessageBoxW(
+                    mainWindow, prompt.c_str(), Text(L"menu_title").c_str(),
+                    MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST);
+            }
 
             {
                 std::lock_guard<std::mutex> lock(devicesMutex);
