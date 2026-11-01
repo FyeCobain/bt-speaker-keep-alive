@@ -733,11 +733,11 @@ namespace
     void DrawCurrentDeviceIndicator(HDC dc, const RECT& row)
     {
         const int centerY = (row.top + row.bottom) / 2;
-        const int left = row.left + 29;
+        const int left = row.right - 26;
         const bool awake = activeKeepAliveStreams.load() > 0;
         HICON statusIcon = awake ? menuIconAwake : menuIconIdle;
         if (statusIcon)
-            DrawIconEx(dc, left - 2, centerY - 10, statusIcon, 20, 20,
+            DrawIconEx(dc, left, centerY - 10, statusIcon, 20, 20,
                        0, nullptr, DI_NORMAL);
     }
 
@@ -749,6 +749,8 @@ namespace
         const DeviceGroup* group = reinterpret_cast<const DeviceGroup*>(item->itemData);
         const bool selected = (item->itemState & ODS_SELECTED) != 0;
         const bool disabled = (item->itemState & ODS_DISABLED) != 0;
+        const COLORREF textColor = selected ? GetSysColor(COLOR_HIGHLIGHTTEXT) :
+            (disabled ? GetSysColor(COLOR_GRAYTEXT) : GetSysColor(COLOR_MENUTEXT));
         FillRect(item->hDC, &item->rcItem,
                  GetSysColorBrush(selected ? COLOR_HIGHLIGHT : COLOR_MENU));
 
@@ -767,12 +769,10 @@ namespace
             DrawCurrentDeviceIndicator(item->hDC, item->rcItem);
 
         SetBkMode(item->hDC, TRANSPARENT);
-        const COLORREF textColor = selected ? GetSysColor(COLOR_HIGHLIGHTTEXT) :
-            (disabled ? GetSysColor(COLOR_GRAYTEXT) : GetSysColor(COLOR_MENUTEXT));
         SetTextColor(item->hDC, textColor);
         RECT textRect = item->rcItem;
-        textRect.left += 50;
-        textRect.right -= 4;
+        textRect.left += 30;
+        textRect.right -= 28;
         DrawTextW(item->hDC, group->name.c_str(),
                   static_cast<int>(group->name.size()), &textRect,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
