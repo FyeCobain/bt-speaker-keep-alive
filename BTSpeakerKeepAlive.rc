@@ -5,7 +5,15 @@
 #define IDI_APP_ICON 101
 #define IDI_TRAY_ACTIVE 102
 #define IDI_TRAY_IDLE 103
+#define TRANSLATION_EN_RESOURCE 201
+#define TRANSLATION_ES_RESOURCE 202
+#define TRANSLATION_DE_RESOURCE 203
+#define TRANSLATION_JA_RESOURCE 204
 
 IDI_APP_ICON ICON "assets/icon-idle.ico"
 IDI_TRAY_ACTIVE ICON "assets/icon-active.ico"
 IDI_TRAY_IDLE ICON "assets/icon-idle.ico"
+TRANSLATION_EN_RESOURCE RCDATA "translations/en.ini"
+TRANSLATION_ES_RESOURCE RCDATA "translations/es.ini"
+TRANSLATION_DE_RESOURCE RCDATA "translations/de.ini"
+TRANSLATION_JA_RESOURCE RCDATA "translations/ja.ini"

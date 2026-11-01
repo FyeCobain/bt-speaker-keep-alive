@@ -36,10 +36,18 @@ namespace
     constexpr UINT COMMAND_OPEN_FOLDER = 1006;
     constexpr UINT COMMAND_START_WITH_WINDOWS = 1007;
     constexpr UINT COMMAND_PROMPT_NEW_DEVICES = 1008;
+    constexpr UINT COMMAND_DOCS = 1009;
     constexpr UINT COMMAND_DEVICE_BASE = 2000;
     constexpr UINT DEVICE_SCAN_TIMER = 1;
     constexpr WORD TRAY_ACTIVE_ICON_RESOURCE = 102;
     constexpr WORD TRAY_IDLE_ICON_RESOURCE = 103;
+    constexpr wchar_t APP_VERSION[] = L"1.5";
+    constexpr wchar_t REPOSITORY_URL[] =
+        L"https://github.com/FyeCobain/bt-speaker-keep-alive";
+    constexpr WORD TRANSLATION_EN_RESOURCE = 201;
+    constexpr WORD TRANSLATION_ES_RESOURCE = 202;
+    constexpr WORD TRANSLATION_DE_RESOURCE = 203;
+    constexpr WORD TRANSLATION_JA_RESOURCE = 204;
     constexpr wchar_t STARTUP_REGISTRY_KEY[] =
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
     // Keep this registry value name stable across display-name and exe renames.
@@ -150,6 +158,32 @@ namespace
         return result;
     }
 
+    bool DecodeUtf8(const char* bytes, size_t byteCount, std::wstring& contents)
+    {
+        if (!bytes || byteCount == 0 || byteCount > 65536)
+            return false;
+
+        const size_t offset = byteCount >= 3 &&
+            static_cast<unsigned char>(bytes[0]) == 0xEF &&
+            static_cast<unsigned char>(bytes[1]) == 0xBB &&
+            static_cast<unsigned char>(bytes[2]) == 0xBF ? 3 : 0;
+        const int byteLength = static_cast<int>(byteCount - offset);
+        const int wideLength = MultiByteToWideChar(
+            CP_UTF8, MB_ERR_INVALID_CHARS, bytes + offset,
+            byteLength, nullptr, 0);
+        if (wideLength <= 0)
+            return false;
+
+        std::vector<wchar_t> wide(static_cast<size_t>(wideLength));
+        if (MultiByteToWideChar(
+                CP_UTF8, MB_ERR_INVALID_CHARS, bytes + offset,
+                byteLength, wide.data(), wideLength) <= 0)
+            return false;
+
+        contents.assign(wide.begin(), wide.end());
+        return true;
+    }
+
     bool ReadUtf8File(const std::wstring& path, std::wstring& contents)
     {
         HANDLE file = CreateFileW(
@@ -173,47 +207,30 @@ namespace
         if (!readOk || bytesRead != bytes.size())
             return false;
 
-        const int offset = bytesRead >= 3 &&
-            static_cast<unsigned char>(bytes[0]) == 0xEF &&
-            static_cast<unsigned char>(bytes[1]) == 0xBB &&
-            static_cast<unsigned char>(bytes[2]) == 0xBF ? 3 : 0;
-        const int wideLength = MultiByteToWideChar(
-            CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + offset,
-            static_cast<int>(bytesRead) - offset, nullptr, 0);
-        if (wideLength <= 0)
-            return false;
-
-        std::vector<wchar_t> wide(static_cast<size_t>(wideLength));
-        if (MultiByteToWideChar(
-                CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + offset,
-                static_cast<int>(bytesRead) - offset, wide.data(), wideLength) <= 0)
-            return false;
-
-        contents.assign(wide.begin(), wide.end());
-        return true;
+        return DecodeUtf8(bytes.data(), bytesRead, contents);
     }
 
     bool LoadTranslationFile(const std::wstring& lang)
     {
-        const std::wstring filename = L"translations\\" + lang + L".ini";
-        const std::wstring candidates[] =
-        {
-            appDirectory + filename,
-            appDirectory + L"..\\..\\" + filename,
-            filename
-        };
+        WORD resourceId = 0;
+        if (lang == L"en") resourceId = TRANSLATION_EN_RESOURCE;
+        else if (lang == L"es") resourceId = TRANSLATION_ES_RESOURCE;
+        else if (lang == L"de") resourceId = TRANSLATION_DE_RESOURCE;
+        else if (lang == L"ja") resourceId = TRANSLATION_JA_RESOURCE;
+        else return false;
 
         std::wstring contents;
-        bool loaded = false;
-        for (const std::wstring& candidate : candidates)
-        {
-            if (ReadUtf8File(candidate, contents))
-            {
-                loaded = true;
-                break;
-            }
-        }
-        if (!loaded)
+        HMODULE module = GetModuleHandleW(nullptr);
+        HRSRC resource = FindResourceW(
+            module, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
+        if (!resource)
+            return false;
+
+        const DWORD resourceSize = SizeofResource(module, resource);
+        HGLOBAL loadedResource = LoadResource(module, resource);
+        const char* resourceData = loadedResource
+            ? static_cast<const char*>(LockResource(loadedResource)) : nullptr;
+        if (!resourceData || !DecodeUtf8(resourceData, resourceSize, contents))
             return false;
 
         std::unordered_map<std::wstring, std::wstring> parsed;
@@ -544,7 +561,8 @@ namespace
         if (statusIcon)
             trayIcon.hIcon = statusIcon;
         trayIcon.uFlags = NIF_ICON | NIF_TIP;
-        const std::wstring tip = Text(awake ? L"tray_tip_active" : L"tray_tip_idle");
+        const std::wstring tip = Text(awake ? L"tray_tip_active" : L"tray_tip_idle") +
+                                 L" v" + APP_VERSION;
         std::wcsncpy(trayIcon.szTip, tip.c_str(), ARRAYSIZE(trayIcon.szTip) - 1);
         trayIcon.szTip[ARRAYSIZE(trayIcon.szTip) - 1] = L'\0';
         Shell_NotifyIconW(NIM_MODIFY, &trayIcon);
@@ -669,6 +687,8 @@ namespace
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, COMMAND_OPEN_FOLDER,
                     Text(L"menu_open_folder").c_str());
+        AppendMenuW(menu, MF_STRING, COMMAND_DOCS,
+                    Text(L"menu_docs").c_str());
         AppendMenuW(menu, MF_STRING, COMMAND_EXIT, Text(L"menu_exit").c_str());
 
         POINT cursor = {};
@@ -692,6 +712,8 @@ namespace
             DestroyWindow(window);
         else if (command == COMMAND_OPEN_FOLDER)
             ShellExecuteW(window, L"open", appDirectory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        else if (command == COMMAND_DOCS)
+            ShellExecuteW(window, L"open", REPOSITORY_URL, nullptr, nullptr, SW_SHOWNORMAL);
         else if (command == COMMAND_START_WITH_WINDOWS)
             ToggleStartWithWindows(window);
         else if (command == COMMAND_PROMPT_NEW_DEVICES)
@@ -797,15 +819,23 @@ namespace
             return 0;
 
         case WM_MEASUREITEM:
-            if (wParam == 0 && MeasureDeviceMenuItem(
-                    reinterpret_cast<MEASUREITEMSTRUCT*>(lParam)))
-                return TRUE;
+            if (wParam == 0)
+            {
+                MEASUREITEMSTRUCT* item =
+                    reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+                if (MeasureDeviceMenuItem(item))
+                    return TRUE;
+            }
             break;
 
         case WM_DRAWITEM:
-            if (wParam == 0 && DrawDeviceMenuItem(
-                    reinterpret_cast<DRAWITEMSTRUCT*>(lParam)))
-                return TRUE;
+            if (wParam == 0)
+            {
+                DRAWITEMSTRUCT* item =
+                    reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+                if (DrawDeviceMenuItem(item))
+                    return TRUE;
+            }
             break;
 
         case WM_COMMAND:
@@ -1345,7 +1375,8 @@ namespace
         trayIcon.hIcon = awake ? trayIconAwake : trayIconIdle;
         if (!trayIcon.hIcon)
             trayIcon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-        const std::wstring tip = Text(awake ? L"tray_tip_active" : L"tray_tip_idle");
+        const std::wstring tip = Text(awake ? L"tray_tip_active" : L"tray_tip_idle") +
+                                 L" v" + APP_VERSION;
         std::wcsncpy(trayIcon.szTip, tip.c_str(), ARRAYSIZE(trayIcon.szTip) - 1);
         trayIcon.szTip[ARRAYSIZE(trayIcon.szTip) - 1] = L'\0';
         trayIconAdded = Shell_NotifyIconW(NIM_ADD, &trayIcon) != FALSE;

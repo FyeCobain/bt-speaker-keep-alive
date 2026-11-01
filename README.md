@@ -1,6 +1,6 @@
 # 🔊 BT Speaker Keep-Alive
 
-> 📦 **Version 1.3**
+> 📦 **Version 1.5**
 
 ## ⚙️ Requirements
 
