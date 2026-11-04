@@ -41,7 +41,7 @@ namespace
     constexpr UINT DEVICE_SCAN_TIMER = 1;
     constexpr WORD TRAY_ACTIVE_ICON_RESOURCE = 102;
     constexpr WORD TRAY_IDLE_ICON_RESOURCE = 103;
-    constexpr wchar_t APP_VERSION[] = L"1.5";
+    constexpr wchar_t APP_VERSION[] = L"1.6";
     constexpr wchar_t REPOSITORY_URL[] =
         L"https://github.com/FyeCobain/bt-speaker-keep-alive";
     constexpr WORD TRANSLATION_EN_RESOURCE = 201;
@@ -67,8 +67,6 @@ namespace
     bool trayIconAdded = false;
     HICON trayIconAwake = nullptr;
     HICON trayIconIdle = nullptr;
-    HICON menuIconAwake = nullptr;
-    HICON menuIconIdle = nullptr;
     std::atomic<unsigned> activeKeepAliveStreams{0};
     std::wstring appDirectory;
     std::wstring language = L"en";
@@ -727,6 +725,26 @@ namespace
         menuDeviceCommands.clear();
     }
 
+    HFONT CreateDeviceMenuFont(bool bold, bool& owned)
+    {
+        owned = false;
+        HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        if (!bold || !font)
+            return font;
+
+        LOGFONTW fontInfo = {};
+        if (GetObjectW(font, sizeof(fontInfo), &fontInfo) == 0)
+            return font;
+        fontInfo.lfWeight = FW_SEMIBOLD;
+        HFONT boldFont = CreateFontIndirectW(&fontInfo);
+        if (boldFont)
+        {
+            owned = true;
+            return boldFont;
+        }
+        return font;
+    }
+
     bool MeasureDeviceMenuItem(MEASUREITEMSTRUCT* item)
     {
         if (!item || item->CtlType != ODT_MENU || !item->itemData)
@@ -736,31 +754,23 @@ namespace
         HDC dc = GetDC(mainWindow);
         if (!dc)
             return false;
-        HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        bool ownsFont = false;
+        HFONT font = CreateDeviceMenuFont(group->current, ownsFont);
         HGDIOBJ previousFont = SelectObject(dc, font);
         SIZE textSize = {};
         GetTextExtentPoint32W(dc, group->name.c_str(),
                               static_cast<int>(group->name.size()), &textSize);
-        if (previousFont)
+        if (previousFont && previousFont != HGDI_ERROR)
             SelectObject(dc, previousFont);
+        if (ownsFont)
+            DeleteObject(font);
         ReleaseDC(mainWindow, dc);
 
-        item->itemWidth = static_cast<UINT>(textSize.cx + 60);
+        item->itemWidth = static_cast<UINT>(textSize.cx + 32);
         item->itemHeight = static_cast<UINT>((std::max)(
             (std::max)(GetSystemMetrics(SM_CYMENU),
                        static_cast<int>(textSize.cy) + 6), 22));
         return true;
-    }
-
-    void DrawCurrentDeviceIndicator(HDC dc, const RECT& row)
-    {
-        const int centerY = (row.top + row.bottom) / 2;
-        const int left = row.right - 26;
-        const bool awake = activeKeepAliveStreams.load() > 0;
-        HICON statusIcon = awake ? menuIconAwake : menuIconIdle;
-        if (statusIcon)
-            DrawIconEx(dc, left, centerY - 10, statusIcon, 20, 20,
-                       0, nullptr, DI_NORMAL);
     }
 
     bool DrawDeviceMenuItem(DRAWITEMSTRUCT* item)
@@ -787,17 +797,20 @@ namespace
                              DFCS_MENUCHECK | (disabled ? DFCS_INACTIVE : 0));
         }
 
-        if (group->current)
-            DrawCurrentDeviceIndicator(item->hDC, item->rcItem);
-
         SetBkMode(item->hDC, TRANSPARENT);
         SetTextColor(item->hDC, textColor);
         RECT textRect = item->rcItem;
         textRect.left += 30;
-        textRect.right -= 28;
+        bool ownsFont = false;
+        HFONT font = CreateDeviceMenuFont(group->current, ownsFont);
+        HGDIOBJ previousFont = SelectObject(item->hDC, font);
         DrawTextW(item->hDC, group->name.c_str(),
                   static_cast<int>(group->name.size()), &textRect,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (previousFont && previousFont != HGDI_ERROR)
+            SelectObject(item->hDC, previousFont);
+        if (ownsFont)
+            DeleteObject(font);
 
         if (item->itemState & ODS_FOCUS)
             DrawFocusRect(item->hDC, &item->rcItem);
@@ -887,16 +900,6 @@ namespace
             {
                 DestroyIcon(trayIconIdle);
                 trayIconIdle = nullptr;
-            }
-            if (menuIconAwake)
-            {
-                DestroyIcon(menuIconAwake);
-                menuIconAwake = nullptr;
-            }
-            if (menuIconIdle)
-            {
-                DestroyIcon(menuIconIdle);
-                menuIconIdle = nullptr;
             }
             {
                 MSG queued = {};
@@ -1365,12 +1368,6 @@ namespace
         trayIconIdle = static_cast<HICON>(LoadImageW(
             instance, MAKEINTRESOURCEW(TRAY_IDLE_ICON_RESOURCE),
             IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
-        menuIconAwake = static_cast<HICON>(LoadImageW(
-            instance, MAKEINTRESOURCEW(TRAY_ACTIVE_ICON_RESOURCE),
-            IMAGE_ICON, 20, 20, LR_DEFAULTCOLOR));
-        menuIconIdle = static_cast<HICON>(LoadImageW(
-            instance, MAKEINTRESOURCEW(TRAY_IDLE_ICON_RESOURCE),
-            IMAGE_ICON, 20, 20, LR_DEFAULTCOLOR));
         const bool awake = activeKeepAliveStreams.load() > 0;
         trayIcon.hIcon = awake ? trayIconAwake : trayIconIdle;
         if (!trayIcon.hIcon)
