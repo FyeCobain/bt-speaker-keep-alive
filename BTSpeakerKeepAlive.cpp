@@ -41,7 +41,7 @@ namespace
     constexpr UINT DEVICE_SCAN_TIMER = 1;
     constexpr WORD TRAY_ACTIVE_ICON_RESOURCE = 102;
     constexpr WORD TRAY_IDLE_ICON_RESOURCE = 103;
-    constexpr wchar_t APP_VERSION[] = L"1.6";
+    constexpr wchar_t APP_VERSION[] = L"1.7";
     constexpr wchar_t REPOSITORY_URL[] =
         L"https://github.com/FyeCobain/bt-speaker-keep-alive";
     constexpr WORD TRANSLATION_EN_RESOURCE = 201;
@@ -52,6 +52,9 @@ namespace
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
     // Keep this registry value name stable across display-name and exe renames.
     constexpr wchar_t STARTUP_VALUE_NAME[] = L"BT Speaker KeepAlive";
+    constexpr wchar_t SETTINGS_REGISTRY_KEY[] =
+        L"Software\\BTSpeakerKeepAlive";
+    constexpr wchar_t SETTINGS_VALUE_NAME[] = L"Settings";
 
     const PROPERTYKEY FRIENDLY_NAME_KEY =
     {
@@ -180,32 +183,6 @@ namespace
 
         contents.assign(wide.begin(), wide.end());
         return true;
-    }
-
-    bool ReadUtf8File(const std::wstring& path, std::wstring& contents)
-    {
-        HANDLE file = CreateFileW(
-            path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE)
-            return false;
-
-        LARGE_INTEGER size = {};
-        if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 65536)
-        {
-            CloseHandle(file);
-            return false;
-        }
-
-        std::vector<char> bytes(static_cast<size_t>(size.QuadPart));
-        DWORD bytesRead = 0;
-        const BOOL readOk = ReadFile(
-            file, bytes.data(), static_cast<DWORD>(bytes.size()), &bytesRead, nullptr);
-        CloseHandle(file);
-        if (!readOk || bytesRead != bytes.size())
-            return false;
-
-        return DecodeUtf8(bytes.data(), bytesRead, contents);
     }
 
     bool LoadTranslationFile(const std::wstring& lang)
@@ -408,21 +385,296 @@ namespace
         return true;
     }
 
-    void SaveSettings()
+    bool ParseCsv(const std::wstring& contents,
+                  std::vector<std::vector<std::wstring>>& rows)
     {
-        const std::wstring path = appDirectory + L"settings.ini";
-        HANDLE file = CreateFileW(
-            path.c_str(), GENERIC_WRITE, 0, nullptr,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE)
-            return;
+        std::vector<std::wstring> fields;
+        std::wstring field;
+        bool quoted = false;
+        bool closedQuote = false;
 
-        std::wstring wideContents = L"language=" + language + L"\r\n";
-        wideContents += L"prompt_new_devices=";
-        wideContents += promptForNewDevices ? L"1\r\n" : L"0\r\n";
+        for (size_t i = 0; i < contents.size(); ++i)
+        {
+            const wchar_t character = contents[i];
+            if (quoted)
+            {
+                if (character == L'"')
+                {
+                    if (i + 1 < contents.size() && contents[i + 1] == L'"')
+                    {
+                        field += L'"';
+                        ++i;
+                    }
+                    else
+                    {
+                        quoted = false;
+                        closedQuote = true;
+                    }
+                }
+                else
+                    field += character;
+            }
+            else if (character == L',' || character == L'\r' || character == L'\n')
+            {
+                fields.push_back(field);
+                field.clear();
+                closedQuote = false;
+                if (character != L',')
+                {
+                    rows.push_back(fields);
+                    fields.clear();
+                    if (character == L'\r' && i + 1 < contents.size() &&
+                        contents[i + 1] == L'\n')
+                        ++i;
+                }
+            }
+            else if (character == L'"')
+            {
+                if (!field.empty() || closedQuote)
+                    return false;
+                quoted = true;
+            }
+            else
+            {
+                if (closedQuote)
+                    return false;
+                field += character;
+            }
+        }
+
+        if (quoted)
+            return false;
+        if (!field.empty() || !fields.empty() || closedQuote)
+        {
+            fields.push_back(field);
+            rows.push_back(fields);
+        }
+        return true;
+    }
+
+    enum class RegistrySettingsResult
+    {
+        Found,
+        Missing,
+        Error
+    };
+
+    void LogRegistrySettingsError(const wchar_t* operation, LSTATUS status)
+    {
+        const std::wstring message =
+            L"BT Speaker Keep-Alive: " + std::wstring(operation) +
+            L" failed with registry error " + std::to_wstring(status) + L".\n";
+        OutputDebugStringW(message.c_str());
+    }
+
+    RegistrySettingsResult ReadLegacyRegistrySettings(std::wstring& contents)
+    {
+        HKEY key = nullptr;
+        LSTATUS status = RegOpenKeyExW(
+            HKEY_CURRENT_USER, SETTINGS_REGISTRY_KEY, 0, KEY_QUERY_VALUE, &key);
+        if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
+            return RegistrySettingsResult::Missing;
+        if (status != ERROR_SUCCESS)
+        {
+            LogRegistrySettingsError(L"opening settings", status);
+            return RegistrySettingsResult::Error;
+        }
+
+        DWORD type = 0;
+        DWORD size = 0;
+        status = RegQueryValueExW(
+            key, SETTINGS_VALUE_NAME, nullptr, &type, nullptr, &size);
+        if (status == ERROR_FILE_NOT_FOUND)
+        {
+            RegCloseKey(key);
+            return RegistrySettingsResult::Missing;
+        }
+        if (status != ERROR_SUCCESS || type != REG_SZ ||
+            size < sizeof(wchar_t) || size % sizeof(wchar_t) != 0)
+        {
+            RegCloseKey(key);
+            LogRegistrySettingsError(
+                L"reading settings", status == ERROR_SUCCESS ? ERROR_INVALID_DATA : status);
+            return RegistrySettingsResult::Error;
+        }
+
+        std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+        status = RegQueryValueExW(
+            key, SETTINGS_VALUE_NAME, nullptr, &type,
+            reinterpret_cast<LPBYTE>(buffer.data()), &size);
+        RegCloseKey(key);
+        if (status != ERROR_SUCCESS || type != REG_SZ ||
+            size % sizeof(wchar_t) != 0)
+        {
+            LogRegistrySettingsError(
+                L"reading settings", status == ERROR_SUCCESS ? ERROR_INVALID_DATA : status);
+            return RegistrySettingsResult::Error;
+        }
+
+        contents.assign(buffer.data(), size / sizeof(wchar_t));
+        if (!contents.empty() && contents.back() == L'\0')
+            contents.pop_back();
+        return RegistrySettingsResult::Found;
+    }
+
+    bool ReadStringSetting(HKEY key, const wchar_t* name,
+                           std::wstring& value, bool& found)
+    {
+        found = false;
+        DWORD type = 0;
+        DWORD size = 0;
+        LSTATUS status = RegQueryValueExW(key, name, nullptr, &type, nullptr, &size);
+        if (status == ERROR_FILE_NOT_FOUND)
+            return true;
+        if (status != ERROR_SUCCESS || type != REG_SZ ||
+            size < sizeof(wchar_t) || size % sizeof(wchar_t) != 0)
+        {
+            LogRegistrySettingsError(
+                L"reading settings", status == ERROR_SUCCESS ? ERROR_INVALID_DATA : status);
+            return false;
+        }
+
+        std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+        status = RegQueryValueExW(
+            key, name, nullptr, &type,
+            reinterpret_cast<LPBYTE>(buffer.data()), &size);
+        if (status != ERROR_SUCCESS || type != REG_SZ ||
+            size < sizeof(wchar_t) || size % sizeof(wchar_t) != 0)
+        {
+            LogRegistrySettingsError(
+                L"reading settings", status == ERROR_SUCCESS ? ERROR_INVALID_DATA : status);
+            return false;
+        }
+
+        value.assign(buffer.data(), size / sizeof(wchar_t));
+        if (!value.empty() && value.back() == L'\0')
+            value.pop_back();
+        found = true;
+        return true;
+    }
+
+    bool ReadDwordSetting(HKEY key, const wchar_t* name,
+                          DWORD& value, bool& found)
+    {
+        found = false;
+        DWORD type = 0;
+        DWORD size = sizeof(value);
+        const LSTATUS status = RegQueryValueExW(
+            key, name, nullptr, &type, reinterpret_cast<LPBYTE>(&value), &size);
+        if (status == ERROR_FILE_NOT_FOUND)
+            return true;
+        if (status != ERROR_SUCCESS || type != REG_DWORD || size != sizeof(value))
+        {
+            LogRegistrySettingsError(
+                L"reading settings", status == ERROR_SUCCESS ? ERROR_INVALID_DATA : status);
+            return false;
+        }
+        found = true;
+        return true;
+    }
+
+    bool LoadCurrentRegistrySettings(bool& hasSettings)
+    {
+        hasSettings = false;
+        HKEY key = nullptr;
+        LSTATUS status = RegOpenKeyExW(
+            HKEY_CURRENT_USER, SETTINGS_REGISTRY_KEY, 0,
+            KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS, &key);
+        if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)
+            return true;
+        if (status != ERROR_SUCCESS)
+        {
+            LogRegistrySettingsError(L"opening settings", status);
+            return false;
+        }
+
+        std::wstring storedLanguage;
+        bool languageFound = false;
+        DWORD storedPrompt = 0;
+        bool promptFound = false;
+        if (!ReadStringSetting(key, L"Language", storedLanguage, languageFound) ||
+            !ReadDwordSetting(key, L"PromptNewDevices", storedPrompt, promptFound))
+        {
+            RegCloseKey(key);
+            return false;
+        }
+        if (languageFound &&
+            (storedLanguage == L"en" || storedLanguage == L"es" ||
+             storedLanguage == L"de" || storedLanguage == L"ja"))
+            language = storedLanguage;
+        if (promptFound && storedPrompt <= 1)
+            promptForNewDevices = storedPrompt == 1;
+        hasSettings = languageFound || promptFound;
+
+        HKEY devicesKey = nullptr;
+        status = RegOpenKeyExW(
+            key, L"Devices", 0, KEY_QUERY_VALUE, &devicesKey);
+        if (status == ERROR_SUCCESS)
+        {
+            DWORD valueCount = 0;
+            DWORD maxValueNameLength = 0;
+            status = RegQueryInfoKeyW(
+                devicesKey, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                &valueCount, &maxValueNameLength, nullptr, nullptr, nullptr);
+            if (status != ERROR_SUCCESS)
+            {
+                RegCloseKey(devicesKey);
+                RegCloseKey(key);
+                LogRegistrySettingsError(L"enumerating device settings", status);
+                return false;
+            }
+            std::vector<wchar_t> name(
+                static_cast<size_t>(maxValueNameLength) + 2, L'\0');
+            for (DWORD index = 0; index < valueCount; ++index)
+            {
+                DWORD nameLength = static_cast<DWORD>(name.size());
+                DWORD type = 0;
+                DWORD data = 0;
+                DWORD dataSize = sizeof(data);
+                status = RegEnumValueW(
+                    devicesKey, index, name.data(), &nameLength, nullptr, &type,
+                    reinterpret_cast<LPBYTE>(&data), &dataSize);
+                if (status != ERROR_SUCCESS)
+                {
+                    RegCloseKey(devicesKey);
+                    RegCloseKey(key);
+                    LogRegistrySettingsError(L"enumerating device settings", status);
+                    return false;
+                }
+                if (type == REG_DWORD && dataSize == sizeof(data) && data <= 1 &&
+                    nameLength > 0)
+                {
+                    RegisteredDevice device;
+                    device.name.assign(name.data(), nameLength);
+                    device.enabled = data == 1;
+                    registeredDevices.push_back(device);
+                }
+                else
+                {
+                    RegCloseKey(devicesKey);
+                    RegCloseKey(key);
+                    LogRegistrySettingsError(L"reading device settings", ERROR_INVALID_DATA);
+                    return false;
+                }
+            }
+            hasSettings = hasSettings || valueCount > 0;
+            RegCloseKey(devicesKey);
+        }
+        else if (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND)
+        {
+            RegCloseKey(key);
+            LogRegistrySettingsError(L"opening device settings", status);
+            return false;
+        }
+        RegCloseKey(key);
+        return true;
+    }
+
+    bool SaveSettings()
+    {
+        std::vector<DeviceGroup> groups;
         {
             std::lock_guard<std::mutex> lock(devicesMutex);
-            std::vector<DeviceGroup> groups;
             for (const RegisteredDevice& device : registeredDevices)
             {
                 auto group = std::find_if(groups.begin(), groups.end(),
@@ -440,114 +692,157 @@ namespace
                 else
                     group->enabled = group->enabled || device.enabled;
             }
-            for (const DeviceGroup& group : groups)
+        }
+
+        HKEY key = nullptr;
+        DWORD disposition = 0;
+        LSTATUS status = RegCreateKeyExW(
+            HKEY_CURRENT_USER, SETTINGS_REGISTRY_KEY, 0, nullptr,
+            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE | KEY_CREATE_SUB_KEY,
+            nullptr, &key, &disposition);
+        if (status != ERROR_SUCCESS)
+        {
+            LogRegistrySettingsError(L"creating settings key", status);
+            return false;
+        }
+
+        DWORD languageSize = static_cast<DWORD>(
+            (language.size() + 1) * sizeof(wchar_t));
+        status = RegSetValueExW(
+            key, L"Language", 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(language.c_str()), languageSize);
+        if (status != ERROR_SUCCESS)
+            LogRegistrySettingsError(L"writing language setting", status);
+
+        DWORD promptValue = promptForNewDevices ? 1 : 0;
+        LSTATUS promptStatus = RegSetValueExW(
+            key, L"PromptNewDevices", 0, REG_DWORD,
+            reinterpret_cast<const BYTE*>(&promptValue), sizeof(promptValue));
+        if (promptStatus != ERROR_SUCCESS)
+            LogRegistrySettingsError(L"writing new-device prompt setting", promptStatus);
+
+        HKEY devicesKey = nullptr;
+        LSTATUS devicesStatus = RegCreateKeyExW(
+            key, L"Devices", 0, nullptr, REG_OPTION_NON_VOLATILE,
+            KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, &devicesKey, &disposition);
+        if (devicesStatus != ERROR_SUCCESS)
+            LogRegistrySettingsError(L"creating device settings key", devicesStatus);
+        else
+        {
+            DWORD valueCount = 0;
+            DWORD maxValueNameLength = 0;
+            devicesStatus = RegQueryInfoKeyW(
+                devicesKey, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                &valueCount, &maxValueNameLength, nullptr, nullptr, nullptr);
+            if (devicesStatus == ERROR_SUCCESS)
             {
-                wideContents += L"device=";
-                wideContents += group.enabled ? L"1," : L"0,";
-                wideContents += group.name;
-                wideContents += L"\r\n";
+                std::vector<std::wstring> oldNames;
+                std::vector<wchar_t> name(
+                    static_cast<size_t>(maxValueNameLength) + 2, L'\0');
+                for (DWORD index = 0; index < valueCount; ++index)
+                {
+                    DWORD nameLength = static_cast<DWORD>(name.size());
+                    devicesStatus = RegEnumValueW(
+                        devicesKey, index, name.data(), &nameLength,
+                        nullptr, nullptr, nullptr, nullptr);
+                    if (devicesStatus != ERROR_SUCCESS)
+                        break;
+                    oldNames.push_back(std::wstring(name.data(), nameLength));
+                }
+                for (const DeviceGroup& group : groups)
+                {
+                    DWORD enabled = group.enabled ? 1 : 0;
+                    devicesStatus = RegSetValueExW(
+                        devicesKey, group.name.c_str(), 0, REG_DWORD,
+                        reinterpret_cast<const BYTE*>(&enabled), sizeof(enabled));
+                    if (devicesStatus != ERROR_SUCCESS)
+                        break;
+                }
+                for (const std::wstring& oldName : oldNames)
+                {
+                    if (devicesStatus != ERROR_SUCCESS)
+                        break;
+                    const bool stillExists = std::any_of(
+                        groups.begin(), groups.end(),
+                        [&oldName](const DeviceGroup& group)
+                        {
+                            return SameDeviceName(group.name, oldName);
+                        });
+                    if (!stillExists)
+                        devicesStatus = RegDeleteValueW(devicesKey, oldName.c_str());
+                }
+            }
+            if (devicesStatus != ERROR_SUCCESS)
+                LogRegistrySettingsError(L"writing device settings", devicesStatus);
+            RegCloseKey(devicesKey);
+        }
+
+        RegCloseKey(key);
+        return status == ERROR_SUCCESS && promptStatus == ERROR_SUCCESS &&
+               devicesStatus == ERROR_SUCCESS;
+    }
+
+    void DeleteLegacyRegistrySettings()
+    {
+        HKEY key = nullptr;
+        LSTATUS status = RegOpenKeyExW(
+            HKEY_CURRENT_USER, SETTINGS_REGISTRY_KEY, 0, KEY_SET_VALUE, &key);
+        if (status != ERROR_SUCCESS)
+        {
+            LogRegistrySettingsError(L"opening migrated settings", status);
+            return;
+        }
+        status = RegDeleteValueW(key, SETTINGS_VALUE_NAME);
+        RegCloseKey(key);
+        if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND)
+            LogRegistrySettingsError(L"removing migrated settings", status);
+    }
+
+    bool LoadLegacyRegistrySettings(const std::wstring& contents)
+    {
+        std::vector<std::vector<std::wstring>> rows;
+        if (!ParseCsv(contents, rows))
+        {
+            LogRegistrySettingsError(L"parsing legacy settings", ERROR_INVALID_DATA);
+            return false;
+        }
+        for (const std::vector<std::wstring>& row : rows)
+        {
+            if (row.size() == 2 && row[0] == L"language" &&
+                (row[1] == L"en" || row[1] == L"es" ||
+                 row[1] == L"de" || row[1] == L"ja"))
+                language = row[1];
+            else if (row.size() == 2 && row[0] == L"prompt_new_devices" &&
+                     (row[1] == L"0" || row[1] == L"1"))
+                promptForNewDevices = row[1] == L"1";
+            else if (row.size() == 3 && row[0] == L"device" &&
+                     (row[1] == L"0" || row[1] == L"1") && !row[2].empty())
+            {
+                RegisteredDevice device;
+                device.enabled = row[1] == L"1";
+                device.name = row[2];
+                registeredDevices.push_back(device);
             }
         }
-        const int byteCount = WideCharToMultiByte(
-            CP_UTF8, WC_ERR_INVALID_CHARS, wideContents.data(),
-            static_cast<int>(wideContents.size()), nullptr, 0, nullptr, nullptr);
-        if (byteCount <= 0)
-        {
-            CloseHandle(file);
-            return;
-        }
-        std::vector<char> contents(static_cast<size_t>(byteCount));
-        if (WideCharToMultiByte(
-                CP_UTF8, WC_ERR_INVALID_CHARS, wideContents.data(),
-                static_cast<int>(wideContents.size()), contents.data(), byteCount,
-                nullptr, nullptr) <= 0)
-        {
-            CloseHandle(file);
-            return;
-        }
-        DWORD written = 0;
-        WriteFile(file, contents.data(), static_cast<DWORD>(contents.size()), &written, nullptr);
-        CloseHandle(file);
+        return true;
     }
 
     void LoadSettings()
     {
-        std::wstring contents;
-        if (!ReadUtf8File(appDirectory + L"settings.ini", contents))
+        bool hasSettings = false;
+        if (!LoadCurrentRegistrySettings(hasSettings) || hasSettings)
             return;
 
-        bool migrateSettings = false;
-        size_t start = 0;
-        while (start <= contents.size())
+        std::wstring contents;
+        const RegistrySettingsResult legacyResult =
+            ReadLegacyRegistrySettings(contents);
+        if (legacyResult == RegistrySettingsResult::Error)
+            return;
+        if (legacyResult == RegistrySettingsResult::Found)
         {
-            const size_t end = contents.find(L'\n', start);
-            const std::wstring line = Trim(contents.substr(
-                start, end == std::wstring::npos ? end : end - start));
-            if (line.compare(0, 9, L"language=") == 0)
-            {
-                const std::wstring value = Trim(line.substr(9));
-                if (value == L"eng" || value == L"en")
-                {
-                    language = L"en";
-                    migrateSettings = migrateSettings || value == L"eng";
-                }
-                else if (value == L"spa" || value == L"es")
-                {
-                    language = L"es";
-                    migrateSettings = migrateSettings || value == L"spa";
-                }
-                else if (value == L"de" || value == L"ja")
-                    language = value;
-            }
-            else if (line.compare(0, 19, L"prompt_new_devices=") == 0)
-                promptForNewDevices = Trim(line.substr(19)) == L"1";
-            else if (line.compare(0, 7, L"device=") == 0)
-            {
-                const size_t firstComma = line.find(L',', 7);
-                const size_t secondComma = line.find(L',', firstComma == std::wstring::npos ? firstComma : firstComma + 1);
-                if (firstComma != std::wstring::npos &&
-                    (line[7] == L'0' || line[7] == L'1'))
-                {
-                    RegisteredDevice device;
-                    device.enabled = line[7] == L'1';
-                    // New format stores only the friendly name. Accept the previous
-                    // ID,name format too so existing settings migrate automatically.
-                    const size_t nameStart = secondComma == std::wstring::npos
-                        ? firstComma + 1 : secondComma + 1;
-                    migrateSettings = migrateSettings ||
-                        secondComma != std::wstring::npos;
-                    const std::wstring encodedName = line.substr(nameStart);
-                    migrateSettings = migrateSettings ||
-                        encodedName.compare(0, 5, L"utf8:") == 0;
-                    const bool decoded = secondComma != std::wstring::npos ||
-                        encodedName.compare(0, 5, L"utf8:") == 0;
-                    const bool validName = decoded
-                        ? DecodeName(encodedName, device.name)
-                        : (device.name = encodedName, true);
-                    if (validName && !device.name.empty())
-                    {
-                        std::lock_guard<std::mutex> lock(devicesMutex);
-                        const auto duplicate = std::find_if(
-                            registeredDevices.begin(), registeredDevices.end(),
-                            [&device](const RegisteredDevice& item)
-                            {
-                                return SameDeviceName(item.name, device.name);
-                            });
-                        if (duplicate == registeredDevices.end())
-                            registeredDevices.push_back(device);
-                        else
-                        {
-                            duplicate->enabled = duplicate->enabled || device.enabled;
-                        }
-                    }
-                }
-            }
-            if (end == std::wstring::npos)
-                break;
-            start = end + 1;
+            if (LoadLegacyRegistrySettings(contents) && SaveSettings())
+                DeleteLegacyRegistrySettings();
         }
-        if (migrateSettings)
-            SaveSettings();
     }
 
     void UpdateTrayIcon()

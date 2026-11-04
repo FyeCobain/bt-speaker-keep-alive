@@ -1,6 +1,6 @@
 # 🔊 BT Speaker Keep-Alive
 
-> 📦 **Version 1.6**
+> 📦 **Version 1.7**
 
 ## ⚙️ Requirements
 
@@ -13,16 +13,11 @@
 ## ✨ Features
 
 - Detects new audio outputs and asks whether to keep them active. If the prompt option is turned off, new devices are disabled by default.
-- Groups devices with the same name and shares their settings.
-- Remembers which devices are enabled for the next time you run the app.
-- Shows the keep-alive status in the tray icon and highlights the current device's name.
+- Shows the keep-alive status in the tray icon (teal when idle, bright cyan when a device is being kept awake) and highlights the current device's name.
 
 ## 🖱️ Tray menu
 
 Right-click the tray icon to access these options:
 
-- 🔊 **Audio devices** — enable or disable each device group.
+- 🔊 **Audio devices** — enable or disable each device.
 - ❔ **Ask about new devices** — show a prompt when a new device is detected (on by default).
-- 🚀 **Start with Windows** — launch the app automatically when you sign in.
-- 🌐 **Language** — change the interface language.
-
